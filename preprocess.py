@@ -1,5 +1,6 @@
 import pickle as pk
 import os
+import numpy as np
 from torch.utils.data import Dataset
 
 START_TAG = "<START>"
@@ -84,7 +85,7 @@ class DataManager:
                 sent = [word2ix[word] if word in word2ix else 0
                         for word in line.strip()]  # UNK is 0
                 self.test_sents.append(sent)
-        print(line, sent)
+        # print(line, sent)
 
 
 class NerDataset(Dataset):
@@ -107,7 +108,7 @@ class NerDataset(Dataset):
         s_len = len(seq)
         assert s_len <= self.max_len
         padded[: s_len] = seq
-        return padded
+        return np.array(padded)
 
 
 if __name__ == '__main__':

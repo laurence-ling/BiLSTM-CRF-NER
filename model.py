@@ -29,23 +29,34 @@ class BiLSTM_CRF(nn.Module):
 
         self.word_embed = nn.Embedding(vocab_size, embedding_dim)
         self.lstm = nn.LSTM(embedding_dim, hidden_dim // 2,
-                            num_layers=1, bidirectional=True)
+                            num_layers=1, bidirectional=True,
+                            batch_first=True)
         self.hidden2tag = nn.Linear(hidden_dim, self.tagset_size)
         self.transitions = nn.Parameter(
             torch.randn(self.tagset_size, self.tagset_size).to(device))
         self.transitions.data[self.tag2ix[START_TAG], :] = -10000
         self.transitions.data[:, self.tag2ix[STOP_TAG]] = -10000
-        self.hidden = self.init_hidden()
 
-    def init_hidden(self):
-        return (torch.randn(2, 1, self.hidden_dim // 2).to(self.device),
-                torch.randn(2, 1, self.hidden_dim // 2).to(self.device))
+    def init_hidden(self, batch_sz):
+        return (torch.randn(2, batch_sz, self.hidden_dim // 2).to(self.device),
+                torch.randn(2, batch_sz, self.hidden_dim // 2).to(self.device))
 
-    def _get_lstm_feature(self, sentence):
-        self.hidden = self.init_hidden()
-        embeds = self.word_embed(sentence).view(len(sentence), 1, -1)
+    def _get_lstm_feature(self, sentence, length):
+        length, idx_sort = torch.sort(length, dim=0, descending=True)
+        _, idx_unsort = torch.sort(idx_sort, dim=0)
+        sentence = sentence[idx_sort]
+
+        batch_sz = sentence.size()[0]
+        self.hidden = self.init_hidden(batch_sz)
+        embeds = self.word_embed(sentence)
+        # batch_sz x max_len x embed_dim
+        embeds = torch.nn.utils.rnn.pack_padded_sequence(embeds, length, batch_first=True)
         lstm_out, self.hidden = self.lstm(embeds, self.hidden)
-        lstm_out = lstm_out.view(len(sentence), self.hidden_dim)
+        unpack, length = torch.nn.utils.rnn.pad_packed_sequence(lstm_out, batch_first=True)
+        # unsort the seq
+        # batch_sz x max_len x hidden_dim
+        lstm_out = unpack[idx_unsort]
+        # batch_sz x max_len x tag_dim
         lstm_feats = self.hidden2tag(lstm_out)
         return lstm_feats
 
@@ -115,13 +126,25 @@ class BiLSTM_CRF(nn.Module):
         score = score + self.transitions[self.tag2ix[STOP_TAG], tags[-1]]
         return score
 
-    def neg_log_likelihood(self, sentence, tags):
-        feats = self._get_lstm_feature(sentence)
-        forward_score = self._forward_alg(feats)
-        gold_score = self._score_sentence(feats, tags)
-        return forward_score - gold_score
+    def neg_log_likelihood(self, sentences, pad_tags, lengths):
+        batch_feats = self._get_lstm_feature(sentences, lengths)
+        batch_loss = torch.zeros(1).to(self.device)
+        for i, real_len in enumerate(lengths):
+            feats = batch_feats[i][: real_len]
+            tags = pad_tags[i][: real_len]
+            # print(real_len, feats.size(), tags)
+            forward_score = self._forward_alg(feats)
+            gold_score = self._score_sentence(feats, tags)
+            batch_loss += forward_score - gold_score
+        return batch_loss / lengths.size()[0]
 
-    def forward(self, sentence):
-        lstm_feats = self._get_lstm_feature(sentence)
-        score, tag_seq = self._viterbi_decode(lstm_feats)
-        return score, tag_seq
+    def forward(self, sentences, lengths):
+        batch_feats = self._get_lstm_feature(sentences, lengths)
+        scores = []
+        tags = []
+        for i, length in enumerate(lengths):
+            lstm_feats = batch_feats[i][: length]
+            score, tag_seq = self._viterbi_decode(lstm_feats)
+            scores.append(score)
+            tags.append(tag_seq)
+        return scores, tags
